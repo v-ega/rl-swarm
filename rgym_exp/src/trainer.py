@@ -1,5 +1,5 @@
 from typing import Any, Optional, List
-
+import gc
 import torch
 from genrl.data import DataManager
 from genrl.logging_utils.global_defs import get_logger
@@ -10,7 +10,6 @@ from genrl.trainer.grpo_trainer import GRPOLanguageTrainerModule
 from reasoning_gym.utils import SYSTEM_PROMPTS
 from rgym_exp.src.utils.judge_client import JudgeClient
 from rgym_exp.src.prg_module import PRGGameStatus
-
 
 PRG_SYSTEM_PROMPT = """Given a question, hints, and possible answers, your task is to answer the question by thinking step-by-step in a clear and specific manner for 1 line only.
 Your answer MUST be one of the possible answers. Provide the answer in the following format:
@@ -43,95 +42,61 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         super().__init__(models, **kwargs)
         judge_base_url = kwargs.get("judge_base_url", None)
         self.judge_client = JudgeClient(judge_base_url) if judge_base_url else None
+        
+        # MPS memory management setup
+        self._is_mps_device = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+        if self._is_mps_device:
+            get_logger().info("MPS device detected - enabling memory optimization")
+
+    def _cleanup_memory(self):
+        """Clean up memory based on device type."""
+        if self._is_mps_device:
+            # Force MPS memory cleanup
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            # CUDA cleanup for consistency
+            torch.cuda.empty_cache()
+        
+        # Force garbage collection
+        gc.collect()
+
+    def _log_memory_usage(self, context: str = ""):
+        """Log current memory usage for debugging."""
+        if self._is_mps_device:
+            # Note: MPS doesn't have direct memory usage APIs like CUDA
+            get_logger().debug(f"MPS memory check - {context}")
+        elif torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated() / 1024**3
+            memory_reserved = torch.cuda.memory_reserved() / 1024**3
+            get_logger().debug(f"CUDA memory usage - {context}: allocated={memory_allocated:.2f} GB, reserved={memory_reserved:.2f} GB")
 
     @torch.no_grad()
     def evaluate(
         self, state: GameState, data_manager: DataManager, reward_manager: RewardManager
     ):
-        if not self.judge_client:
-            return
-            
         try:
-            model_name = self.model.name_or_path
-        except AttributeError:
-            model_name = "none"
-
-        # Request question from judge service
-        result = self.judge_client.request_question(
-            user_id=state.peer_id,
-            round_number=state.round,
-            model_name=model_name
-        )
-        
-        if not result:
-            return
-
-        # Generate answer using the model
-        prompt = [
-            {"role": "system", "content": SYSTEM_PROMPTS["default"]},
-            {"role": "user", "content": result["question"]},
-        ]
-        input_ids = self.processing_class.apply_chat_template(
-            prompt,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-        )
-
-        # TODO: Make the dtype changes from genrl here?
-        input_ids = input_ids.to(self.model.device)
-        outputs = self.model.generate(input_ids, max_new_tokens=512)
-        answer = self.processing_class.decode(
-            outputs[0], skip_special_tokens=True
-        )
-        
-        # Submit answer to judge service
-        self.judge_client.submit_answer(
-            session_id=result["session_id"],
-            round_number=state.round,
-            user_answer=answer
-        )
-
-    @torch.no_grad()
-    def play_prg_game_logits(
-        self, prg_history_dict: dict
-    ) -> dict:
-        if not self.judge_client:
-            return {'status': PRGGameStatus.ERROR}
-
-        # Get current clue from judge service
-        game_clue_dict = self.judge_client.get_current_clue()
-        
-        if not isinstance(game_clue_dict, dict):
-            return {'status': PRGGameStatus.ERROR}
-        
-        # If no clue or game_id or clue_id is -1, take no action
-        game_id = game_clue_dict.get("game_id", -1)
-        clue_id = game_clue_dict.get("clue_id", -1)
-        rounds_remaining = game_clue_dict.get("rounds_remaining", -1)
-        clue = game_clue_dict.get("clue") or ""
-        choices = game_clue_dict.get("choices") or []
-        
-        # No active game
-        if any(val < 0 for val in (game_id, clue_id, rounds_remaining)):
-            return {'status': PRGGameStatus.NO_ACTIVE_GAME}
-        # We have already answered this clue
-        if game_id in prg_history_dict and clue_id <= prg_history_dict[game_id]:
-            return {'status': PRGGameStatus.ALREADY_ANSWERED}
-        # malformed input
-        if not clue or not isinstance(choices, list) or not choices:
-            return {'status': PRGGameStatus.ERROR}
-        
-        get_logger().info(f"New clue received for PRG: {game_clue_dict}")
-
-        try:
-            choices_str = ", ".join(choices)
-            custom_prompt = f"{clue}\nPossible Answers: {choices_str}\nAnswer:"
+            if not self.judge_client:
+                return
             
-            # Generate answer using the model with custom prompt
+            try:
+                model_name = self.model.name_or_path
+            except AttributeError:
+                model_name = "none"
+
+            # Request question from judge service
+            result = self.judge_client.request_question(
+                user_id=state.peer_id,
+                round_number=state.round,
+                model_name=model_name
+            )
+            
+            if not result:
+                return
+
+            # Generate answer using the model
             prompt = [
-                {"role": "system", "content": PRG_SYSTEM_PROMPT_NO_THINKING},
-                {"role": "user", "content": custom_prompt},
+                {"role": "system", "content": SYSTEM_PROMPTS["default"]},
+                {"role": "user", "content": result["question"]},
             ]
             input_ids = self.processing_class.apply_chat_template(
                 prompt,
@@ -142,24 +107,101 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
 
             # TODO: Make the dtype changes from genrl here?
             input_ids = input_ids.to(self.model.device)
+            outputs = self.model.generate(input_ids, max_new_tokens=512)
+            answer = self.processing_class.decode(
+                outputs[0], skip_special_tokens=True
+            )
             
-            # Get logits for each choice
-            choice_logits = self._get_choice_logits(input_ids, choices)
-            
-            # Select the choice with highest probability
-            choice_idx = torch.argmax(choice_logits).item()
-            return {
-                "game_idx": game_id,
-                "clue_idx": clue_id,
-                "choice_idx": choice_idx,
-                "choice": choices[choice_idx],
-                "rounds_remaining": rounds_remaining,
-                "status": PRGGameStatus.SUCCESS
-            }
-
+            # Submit answer to judge service
+            self.judge_client.submit_answer(
+                session_id=result["session_id"],
+                round_number=state.round,
+                user_answer=answer
+            )
+            # Clean up memory after evaluation
+            self._cleanup_memory()
+            self._log_memory_usage("after evaluation")
         except Exception as e:
-            get_logger().info(f"Error while computing logits for choices: {e}")
-            return {'status': PRGGameStatus.ERROR}
+            self._cleanup_memory()
+            raise e
+
+    @torch.no_grad()
+    def play_prg_game_logits(
+        self, prg_history_dict: dict
+    ) -> dict:
+        try:
+            if not self.judge_client:
+                return {'status': PRGGameStatus.ERROR}
+
+            # Get current clue from judge service
+            game_clue_dict = self.judge_client.get_current_clue()
+            
+            if not isinstance(game_clue_dict, dict):
+                return {'status': PRGGameStatus.ERROR}
+            
+            # If no clue or game_id or clue_id is -1, take no action
+            game_id = game_clue_dict.get("game_id", -1)
+            clue_id = game_clue_dict.get("clue_id", -1)
+            rounds_remaining = game_clue_dict.get("rounds_remaining", -1)
+            clue = game_clue_dict.get("clue") or ""
+            choices = game_clue_dict.get("choices") or []
+            
+            # No active game
+            if any(val < 0 for val in (game_id, clue_id, rounds_remaining)):
+                return {'status': PRGGameStatus.NO_ACTIVE_GAME}
+            # We have already answered this clue
+            if game_id in prg_history_dict and clue_id <= prg_history_dict[game_id]:
+                return {'status': PRGGameStatus.ALREADY_ANSWERED}
+            # malformed input
+            if not clue or not isinstance(choices, list) or not choices:
+                return {'status': PRGGameStatus.ERROR}
+            
+            get_logger().info(f"New clue received for PRG: {game_clue_dict}")
+
+            try:
+                choices_str = ", ".join(choices)
+                custom_prompt = f"{clue}\nPossible Answers: {choices_str}\nAnswer:"
+                
+                # Generate answer using the model with custom prompt
+                prompt = [
+                    {"role": "system", "content": PRG_SYSTEM_PROMPT_NO_THINKING},
+                    {"role": "user", "content": custom_prompt},
+                ]
+                input_ids = self.processing_class.apply_chat_template(
+                    prompt,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                )
+
+                # TODO: Make the dtype changes from genrl here?
+                input_ids = input_ids.to(self.model.device)
+                
+                # Get logits for each choice
+                choice_logits = self._get_choice_logits(input_ids, choices)
+                
+                # Select the choice with highest probability
+                choice_idx = torch.argmax(choice_logits).item()
+                result = {
+                    "game_idx": game_id,
+                    "clue_idx": clue_id,
+                    "choice_idx": choice_idx,
+                    "choice": choices[choice_idx],
+                    "rounds_remaining": rounds_remaining,
+                    "status": PRGGameStatus.SUCCESS
+                }
+                # Clean up memory after PRG game
+                self._cleanup_memory()
+                self._log_memory_usage("after PRG game")
+                return result
+
+            except Exception as e:
+                get_logger().info(f"Error while computing logits for choices: {e}")
+                self._cleanup_memory()
+                raise e
+        except Exception as e:
+            self._cleanup_memory()
+            raise e
 
     def _get_choice_logits(self, input_ids: torch.Tensor, choices: List[str]) -> torch.Tensor:
         """
@@ -167,31 +209,35 @@ class GRPOTrainerModule(GRPOLanguageTrainerModule, LoggerMixin):
         the sum of log-probabilities that the model assigns to generating
         "<answer>{choice}</answer>" after the given input_ids.
         """
+        try:
+            device = input_ids.device
+            batch_size, prompt_len = input_ids.shape
+            logits_list = []
 
-        device = input_ids.device
-        batch_size, prompt_len = input_ids.shape
-        logits_list = []
+            for choice in choices:
+                # 1) build the full token sequence: prompt + "<answer>…</answer>"
+                # TODO: Make the dtype changes from genrl here?
+                answer_str = f"<answer>{choice}</answer>"
+                choice_ids = self.processing_class(
+                    answer_str,
+                    return_tensors="pt",
+                    add_special_tokens=False
+                ).input_ids.to(device)    # shape (1, L)
 
-        for choice in choices:
-            # 1) build the full token sequence: prompt + "<answer>…</answer>"
-            # TODO: Make the dtype changes from genrl here?
-            answer_str = f"<answer>{choice}</answer>"
-            choice_ids = self.processing_class(
-                answer_str,
-                return_tensors="pt",
-                add_special_tokens=False
-            ).input_ids.to(device)    # shape (1, L)
+                seq = torch.cat([input_ids, choice_ids], dim=1)  # (1, prompt_len + L)
 
-            seq = torch.cat([input_ids, choice_ids], dim=1)  # (1, prompt_len + L)
+                # build labels that only include the answer positions
+                labels = seq.clone()
+                labels[:, :prompt_len] = -100  # ignore prompt positions in loss
+                outputs = self.model(input_ids=seq, labels=labels)
+                # outputs.loss is average negative log-likelihood over the L answer tokens
 
-            # build labels that only include the answer positions
-            labels = seq.clone()
-            labels[:, :prompt_len] = -100  # ignore prompt positions in loss
-            outputs = self.model(input_ids=seq, labels=labels)
-            # outputs.loss is average negative log-likelihood over the L answer tokens
+                total_log_prob = -outputs.loss * choice_ids.size(1)
+                logits_list.append(total_log_prob)
 
-            total_log_prob = -outputs.loss * choice_ids.size(1)
-            logits_list.append(total_log_prob)
-
-        # stack into a single tensor of shape (num_choices,)
-        return torch.stack(logits_list)
+            # stack into a single tensor of shape (num_choices,)
+            return torch.stack(logits_list)
+        finally:
+            # Clean up intermediate tensors
+            if self._is_mps_device:
+                torch.mps.empty_cache()

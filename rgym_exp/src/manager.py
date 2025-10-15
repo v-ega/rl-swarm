@@ -19,6 +19,9 @@ from huggingface_hub import login, whoami
 from rgym_exp.src.utils.name_utils import get_name_from_peer_id
 from rgym_exp.src.prg_module import PRGModule
 
+import gc
+import torch
+
 
 class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
     """GameManager that orchestrates a game using a SwarmCoordinator."""
@@ -94,6 +97,11 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         self.prg_module = PRGModule(log_dir, **kwargs)
         self.prg_game = self.prg_module.prg_game
 
+        # Memory management setup
+        self._is_mps_device = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+        self._memory_cleanup_interval = 5  # Clean memory every 5 rounds
+        self._rounds_since_cleanup = 0
+
     def _get_total_rewards_by_agent(self):
         rewards_by_agent = defaultdict(int)
         for stage in range(self.state.stage):
@@ -145,6 +153,16 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
         self.batched_signals += self._get_my_rewards(signal_by_agent)
         self._try_submit_to_chain(signal_by_agent)
 
+    def _cleanup_memory(self):
+        """Aggressive memory cleanup for MPS devices."""
+        if self._is_mps_device:
+            torch.mps.empty_cache()
+        elif torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Force garbage collection
+        gc.collect()
+
     def _hook_after_round_advanced(self):
         if self.prg_game:
             # TODO: Ideally I think the judge client request question bit should come in the manager and the trainer should be doing only PyTorch-y stuff, 
@@ -162,6 +180,13 @@ class SwarmGameManager(BaseGameManager, DefaultGameManagerMixin):
 
         # Reset flag for next round
         self.submitted_this_round = False
+
+        # Periodic memory cleanup
+        self._rounds_since_cleanup += 1
+        if self._rounds_since_cleanup >= self._memory_cleanup_interval:
+            get_logger().info("Performing periodic memory cleanup")
+            self._cleanup_memory()
+            self._rounds_since_cleanup = 0
 
         # Block until swarm round advances
         self.agent_block()

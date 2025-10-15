@@ -267,6 +267,13 @@ echo -en $RESET_TEXT
 echo_green ">> Good luck in the swarm!"
 echo_blue ">> And remember to star the repo on GitHub! --> https://github.com/gensyn-ai/rl-swarm"
 
+# MPS-specific memory management
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
+    export PYTORCH_ENABLE_MPS_FALLBACK=1
+    echo_green ">> MPS memory optimizations enabled"
+fi
+
 python -m rgym_exp.runner.swarm_launcher \
     --config-path "$ROOT/rgym_exp/config" \
     --config-name "rg-swarm.yaml" 
