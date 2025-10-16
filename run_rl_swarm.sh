@@ -54,6 +54,7 @@ ORG_ID=${ORG_ID:-""}
 GREEN_TEXT="\033[32m"
 BLUE_TEXT="\033[34m"
 RED_TEXT="\033[31m"
+YELLOW_TEXT="\033[33m"
 RESET_TEXT="\033[0m"
 
 echo_green() {
@@ -66,6 +67,10 @@ echo_blue() {
 
 echo_red() {
     echo -e "$RED_TEXT$1$RESET_TEXT"
+}
+
+echo_w  () { 
+    echo -e "$YELLOW_TEXT$1$RESET_TEXT"; 
 }
 
 ROOT_DIR="$(cd $(dirname ${BASH_SOURCE[0]}) && pwd)"
@@ -86,7 +91,7 @@ mkdir -p "$ROOT/logs"
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 ensure_pkg() {
   if ! need_cmd "$1"; then
-    echo_yel ">> Installing $1…"
+    echo_w ">> Installing $1…"
     apt-get update -y >/dev/null 2>&1 || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$1"
   fi
@@ -100,7 +105,7 @@ start_modal_login() {
   cd "$ML_DIR"
 
   if ! need_cmd node; then
-    echo_yel "Node.js not found → install NVM + Node.js"
+    echo_w "Node.js not found → install NVM + Node.js"
     export NVM_DIR="$HOME/.nvm"
     curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
     # shellcheck disable=SC1090
@@ -111,7 +116,7 @@ start_modal_login() {
   fi
 
   if ! need_cmd yarn; then
-    echo_yel "Yarn not found → npm i -g yarn"
+    echo_w "Yarn not found → npm i -g yarn"
     npm install -g yarn >/dev/null 2>&1
   fi
 
@@ -181,11 +186,11 @@ extract_org_id() {
 
 wait_api_key_activation() {
   if [[ "${REQUIRE_API_KEY_ACTIVATION}" != "1" ]]; then
-    echo_yel ">> API-key activation check skipped."
+    echo_w ">> API-key activation check skipped."
     return 0
   fi
   if [[ -z "${ORG_ID:-}" || "$ORG_ID" == "null" ]]; then
-    echo_yel ">> API-key activation check skipped (ORG_ID empty)."
+    echo_w ">> API-key activation check skipped (ORG_ID empty)."
     return 0
   fi
   echo_green ">> Waiting for API key activation (timeout ${API_KEY_WAIT_SECONDS}s)…"
@@ -205,7 +210,7 @@ wait_api_key_activation() {
       break
     fi
     if (( $(date +%s) >= deadline )); then
-      echo_yel ">> Activation wait timed out — proceeding anyway."
+      echo_w ">> Activation wait timed out — proceeding anyway."
       break
     fi
     echo_blue ">> Waiting for API key to be activated…"
@@ -235,7 +240,7 @@ sync_config() {
         cp "$SRC" "$DST"
         echo_green ">> Config reset to default (backup saved)."
       else
-        echo_yel ">> Config differs. Keep existing (set GENSYN_RESET_CONFIG to overwrite)."
+        echo_w ">> Config differs. Keep existing (set GENSYN_RESET_CONFIG to overwrite)."
       fi
     fi
   else
@@ -263,7 +268,7 @@ is_process_active() {
   if [[ -f "$log_file" ]]; then
     local log_age=$(( $(date +%s) - $(stat -c %Y "$log_file" 2>/dev/null || echo 0) ))
     if (( log_age > MONITOR_INTERVAL * 2 )); then
-      echo_yel ">> Process $pid seems stuck (log not updated for ${log_age}s)"
+      echo_w ">> Process $pid seems stuck (log not updated for ${log_age}s)"
       return 1  # процесс завис
     fi
   fi
@@ -337,7 +342,7 @@ while true; do
     fi
     
     if ! is_process_active "$SWARM_PID" "$THIS_LOG"; then
-      echo_yel ">> Process $SWARM_PID is no longer active"
+      echo_w ">> Process $SWARM_PID is no longer active"
       wait "$SWARM_PID" 2>/dev/null || true
       EXIT_CODE=$?
       
@@ -364,10 +369,10 @@ while true; do
   rm -f /tmp/torch_* 2>/dev/null || true
 
   if (( FAIL_STREAK > FREQ_FAIL_THRESHOLD )); then
-    echo_yel ">> Frequent failures detected (streak=$FAIL_STREAK) → sleep ${LONG_DELAY}s"
+    echo_w ">> Frequent failures detected (streak=$FAIL_STREAK) → sleep ${LONG_DELAY}s"
     sleep "$LONG_DELAY"
   else
-    echo_yel ">> Restarting in ${RESTART_DELAY}s…"
+    echo_w ">> Restarting in ${RESTART_DELAY}s…"
     sleep "$RESTART_DELAY"
   fi
 done
