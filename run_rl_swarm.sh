@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT=$PWD
 
 # GenRL Swarm version to use
-GENRL_TAG="${GENRL_TAG:-0.1.9}"
+GENRL_TAG="${GENRL_TAG:-0.1.10}"
 
 # ========== Paths & Defaults ==========
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
