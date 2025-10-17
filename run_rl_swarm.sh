@@ -273,4 +273,8 @@ while true; do
     echo_red ">> rl-swarm exited code $CODE. Restarting in 5s…"
   fi
   sleep 5
+<<<<<<< HEAD
 done
+=======
+done
+>>>>>>> c74674762ebc080f7b43b093e3f72defbf0b2605
