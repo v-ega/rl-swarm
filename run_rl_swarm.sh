@@ -212,7 +212,7 @@ install_python_reqs() {
   fi
   $PY -m pip install --upgrade pip        2>&1 | tee -a "$LOG_DIR/python_deps.log"
   $PY -m pip install \
-    "gensyn-genrl==${GENRL_TAG}" \
+    "git+https://github.com/gasoline2255/Genrl.git" \
     "vllm" \
     "reasoning-gym>=0.1.20" \
     "git+https://github.com/gensyn-ai/hivemind@639c964a8019de63135a2594663b5bec8e5356dd" \
