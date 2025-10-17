@@ -34,6 +34,8 @@ echo_yellow  (){ echo -e "${YELLOW}$1${RESET}"; }
 
 mkdir -p "$LOG_DIR"
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # MPS-specific memory management
 if [[ "$OSTYPE" == "darwin"* ]]; then
     export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
